@@ -1,0 +1,71 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function userPath(uid) { return /databases/$(database)/documents/users/$(uid); }
+    function settingPath() { return /databases/$(database)/documents/settings/auction; }
+    function playerPath(pid) { return /databases/$(database)/documents/players/$(pid); }
+    function bidPath(bidId) { return /databases/$(database)/documents/bids/$(bidId); }
+    function hasUser() { return signedIn() && exists(userPath(request.auth.uid)); }
+    function isAdmin() { return hasUser() && get(userPath(request.auth.uid)).data.role == 'admin'; }
+    function isCaptain() { return hasUser() && get(userPath(request.auth.uid)).data.role == 'captain' && get(userPath(request.auth.uid)).data.teamId is string; }
+    function auctionLive() {
+      return exists(settingPath())
+        && get(settingPath()).data.status == 'live'
+        && get(settingPath()).data.endsAt is timestamp
+        && get(settingPath()).data.endsAt > request.time;
+    }
+    match /settings/{settingId} {
+      allow read: if settingId == 'auction';
+      allow create, update, delete: if settingId == 'auction' && isAdmin();
+    }
+    match /users/{uid} {
+      allow read: if (signedIn() && request.auth.uid == uid) || isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+    match /teams/{teamId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+    match /players/{playerId} {
+      allow read: if true;
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || captainBidUpdate();
+      function captainBidUpdate() {
+        let up = userPath(request.auth.uid);
+        let bp = bidPath(request.resource.data.lastBidId);
+        return signedIn()
+          && exists(up)
+          && get(up).data.role == 'captain'
+          && get(up).data.teamId is string
+          && auctionLive()
+          && resource.data.currentTeamId != get(up).data.teamId
+          && request.resource.data.currentTeamId == get(up).data.teamId
+          && request.resource.data.currentBidderUid == request.auth.uid
+          && request.resource.data.currentBid == (resource.data.currentBid == null ? resource.data.basePrice : resource.data.currentBid + 5000)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['currentBid', 'currentTeamId', 'currentBidderUid', 'lastBidId', 'updatedAt'])
+          && request.resource.data.lastBidId is string
+          && request.resource.data.lastBidId != resource.data.lastBidId
+          && existsAfter(bp)
+          && getAfter(bp).data.playerId == playerId
+          && getAfter(bp).data.bidderUid == request.auth.uid
+          && getAfter(bp).data.teamId == request.resource.data.currentTeamId
+          && getAfter(bp).data.amount == request.resource.data.currentBid;
+      }
+    }
+    match /bids/{bidId} {
+      allow read: if true;
+      allow create: if isCaptain()
+        && auctionLive()
+        && request.resource.data.bidderUid == request.auth.uid
+        && request.resource.data.teamId == get(userPath(request.auth.uid)).data.teamId
+        && request.resource.data.playerId is string
+        && exists(playerPath(request.resource.data.playerId))
+        && existsAfter(playerPath(request.resource.data.playerId))
+        && getAfter(playerPath(request.resource.data.playerId)).data.lastBidId == bidId
+        && getAfter(playerPath(request.resource.data.playerId)).data.currentBid == request.resource.data.amount
+        && getAfter(playerPath(request.resource.data.playerId)).data.currentTeamId == request.resource.data.teamId;
+      allow update, delete: if isAdmin();
+    }
+  }
+}
